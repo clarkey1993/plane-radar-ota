@@ -1,0 +1,7 @@
+{
+  "version": "1.0.2",
+  "platform": "esp32",
+  "bin_url": "https://raw.githubusercontent.com/clarkey1993/plane-radar-ota/main/releases/firmware-v1.0.2/firmware.bin",
+  "sha256": "79d0ad0f224b227ec7d7c9c145562bcbcac38e51dcc08687d65858f365450053",
+  "size": 1064224
+}
