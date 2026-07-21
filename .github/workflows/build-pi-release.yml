@@ -1,0 +1,107 @@
+name: Build and publish Raspberry Pi release
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Branch, tag, or commit from plane-radar-2.0-pi
+        required: true
+        default: main
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: plane-radar-pi-release
+  cancel-in-progress: false
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout OTA repository
+        uses: actions/checkout@v4
+
+      - name: Checkout Raspberry Pi source
+        uses: actions/checkout@v4
+        with:
+          repository: clarkey1993/plane-radar-2.0-pi
+          ref: ${{ inputs.source_ref }}
+          path: source
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install test dependencies
+        run: pip install pillow numpy
+
+      - name: Test source
+        run: |
+          PYTHONPATH=source/pi python -m unittest discover -s source/pi/tests -v
+          PYTHONPATH=source/pi python -m compileall -q source/pi/plane_radar
+
+      - name: Build verified Pi assets
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION=$(sed -n 's/^__version__ = "\([^"]*\)"/\1/p' source/pi/plane_radar/__init__.py)
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid Pi version: $VERSION" >&2
+            exit 1
+          fi
+
+          TAG="pi-v${VERSION}"
+          SOURCE_SHA=$(git -C source rev-parse HEAD)
+          mkdir -p build/package
+          cp -a source/pi/plane_radar build/package/
+          cp source/pi/config.example.json source/pi/README.md build/package/
+          tar --exclude='__pycache__' --exclude='*.pyc' -C build/package -czf plane-radar-pi.tar.gz .
+
+          SHA=$(sha256sum plane-radar-pi.tar.gz | awk '{print $1}')
+          SIZE=$(stat -c%s plane-radar-pi.tar.gz)
+          cat > pi-manifest.json <<EOF
+          {
+            "version": "$VERSION",
+            "platform": "raspberry-pi",
+            "repository": "clarkey1993/plane-radar-ota",
+            "source_repository": "clarkey1993/plane-radar-2.0-pi",
+            "source_commit": "$SOURCE_SHA",
+            "sha256": "$SHA",
+            "size": $SIZE
+          }
+          EOF
+          python -m json.tool pi-manifest.json >/dev/null
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "source_sha=$SOURCE_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Publish immutable Pi release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+          VERSION: ${{ steps.release.outputs.version }}
+          SOURCE_SHA: ${{ steps.release.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; bump the Pi source version." >&2
+            exit 1
+          fi
+          gh release create "$TAG" plane-radar-pi.tar.gz pi-manifest.json \
+            --target "$GITHUB_SHA" \
+            --title "Plane Radar Pi $VERSION" \
+            --notes "Verified Raspberry Pi OTA release built from clarkey1993/plane-radar-2.0-pi@$SOURCE_SHA." \
+            --latest=false
+
+      - name: Retain build evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: plane-radar-pi-${{ steps.release.outputs.version }}
+          path: |
+            plane-radar-pi.tar.gz
+            pi-manifest.json
